@@ -1,0 +1,14 @@
+# uv / Python
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+uv.lock
+
+# generated outputs
+pages/data/*
+*_observations.csv
+!pages/data/saigon_observations.csv
+
+# OS
+.DS_Store
