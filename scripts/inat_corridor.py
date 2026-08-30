@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""
+inat_corridor.py — pull iNaturalist observations inside a bounding box
+(default: Saigon / Ho Chi Minh City).
+
+This repo does not use a GPX corridor. Pass --gpx only if you want the
+original trail-buffer behaviour from sapa-wildlife.
+
+Usage:
+  python scripts/inat_corridor.py
+  python scripts/inat_corridor.py --bbox 10.72 106.62 10.88 106.85 --taxon birds
+  python scripts/inat_corridor.py --gpx route.gpx --buffer 1.5
+
+Notes:
+  * quality_grade defaults to "research" and captive/cultivated records are excluded.
+  * iNat OBSCURES coordinates for many threatened taxa by randomising them within
+    ~0.2 deg (~20 km). Those points are flagged via `coords_obscured`.
+"""
+
+import argparse
+import csv
+import math
+import os
+import sys
+import time
+
+import requests
+from pyproj import Transformer
+from shapely.geometry import LineString, Point
+from shapely.ops import transform as shp_transform
+
+INAT = "https://api.inaturalist.org/v1/observations"
+# Put your email in the UA — iNat asks for a way to contact heavy users.
+USER_AGENT = "inat_corridor.py (personal city-species reference; contact: you@example.com)"
+
+# Ho Chi Minh City / Saigon envelope (SWLAT, SWLON, NELAT, NELON).
+SAIGON_BBOX = (10.349, 106.364, 11.160, 107.027)
+
+# Common iNaturalist taxon IDs, for the --taxon convenience flag.
+TAXA = {
+    "snakes": 85553,      # Serpentes
+    "reptiles": 26036,    # Reptilia
+    "amphibians": 20978,  # Amphibia
+    "birds": 3,           # Aves
+    "mammals": 40151,     # Mammalia
+    "insects": 47158,     # Insecta
+    "plants": 47126,      # Plantae
+    "fungi": 47170,       # Fungi
+}
+
+
+def parse_gpx(path):
+    """Return [(lat, lon), ...] from a GPX file. Namespace-agnostic; handles both
+    <trkpt> tracks and <rtept> routes. No gpxpy dependency."""
+    import xml.etree.ElementTree as ET
+    root = ET.parse(path).getroot()
+    pts = []
+    for tag in ("trkpt", "rtept", "wpt"):
+        for el in root.iter():
+            if el.tag.split("}")[-1] == tag:  # strip namespace
+                try:
+                    pts.append((float(el.attrib["lat"]), float(el.attrib["lon"])))
+                except (KeyError, ValueError):
+                    continue
+        if pts:  # prefer track points; stop at the first tag that yields any
+            break
+    if not pts:
+        sys.exit(f"No track/route points found in {path}")
+    return pts
+
+
+def utm_epsg(lat, lon):
+    """EPSG code for the UTM zone containing (lat, lon)."""
+    zone = int((lon + 180) // 6) + 1
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def build_corridor(coords, buffer_km):
+    """Return (corridor_polygon_utm, to_utm_fn). Line reprojected to local UTM,
+    buffered by buffer_km, so distances are real metres not degrees."""
+    lat0, lon0 = coords[0]
+    epsg = utm_epsg(lat0, lon0)
+    to_utm = Transformer.from_crs(4326, epsg, always_xy=True).transform
+    line_wgs = LineString([(lon, lat) for lat, lon in coords])
+    line_utm = shp_transform(to_utm, line_wgs)
+    corridor = line_utm.buffer(buffer_km * 1000.0)
+    return corridor, to_utm
+
+
+def corridor_bbox(coords, buffer_km):
+    """Padded lat/lon bounding box (sw_lat, sw_lon, ne_lat, ne_lon) around the route."""
+    lats = [c[0] for c in coords]
+    lons = [c[1] for c in coords]
+    pad_lat = buffer_km / 111.0
+    midlat = sum(lats) / len(lats)
+    pad_lon = buffer_km / (111.0 * max(0.1, math.cos(math.radians(midlat))))
+    return (min(lats) - pad_lat, min(lons) - pad_lon,
+            max(lats) + pad_lat, max(lons) + pad_lon)
+
+
+def iter_observations(bbox, taxon_id=None, quality_grade="research",
+                      exclude_captive=True, per_page=200, pause=0.7, verbose=True):
+    """Yield observation dicts inside bbox, cursor-paginated by id (no 10k cap)."""
+    sw_lat, sw_lon, ne_lat, ne_lon = bbox
+    params = {
+        "swlat": sw_lat, "swlng": sw_lon, "nelat": ne_lat, "nelng": ne_lon,
+        "quality_grade": quality_grade,
+        "geo": "true", "geoprivacy": "open",
+        "per_page": per_page, "order_by": "id", "order": "asc",
+    }
+    if taxon_id:
+        params["taxon_id"] = taxon_id
+    if exclude_captive:
+        params["captive"] = "false"
+
+    session = requests.Session()
+    session.headers["User-Agent"] = USER_AGENT
+    id_above, fetched = 0, 0
+    while True:
+        params["id_above"] = id_above
+        r = session.get(INAT, params=params, timeout=60)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        if not results:
+            break
+        for obs in results:
+            yield obs
+        fetched += len(results)
+        id_above = max(o["id"] for o in results)
+        if verbose:
+            print(f"  fetched {fetched} observations (last id {id_above})", file=sys.stderr)
+        if len(results) < per_page:
+            break
+        time.sleep(pause)
+
+
+def obs_coords(obs):
+    """(lat, lon) or None from an observation record."""
+    geo = obs.get("geojson")
+    if geo and geo.get("coordinates"):
+        lon, lat = geo["coordinates"]
+        return lat, lon
+    loc = obs.get("location")
+    if loc:
+        try:
+            lat, lon = map(float, loc.split(","))
+            return lat, lon
+        except ValueError:
+            pass
+    return None
+
+
+def photo_url(obs, size="large"):
+    photos = obs.get("photos") or []
+    if photos and photos[0].get("url"):
+        return photos[0]["url"].replace("square", size)
+    return ""
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Pull iNaturalist observations for a Saigon bounding box.")
+    src = ap.add_mutually_exclusive_group(required=False)
+    src.add_argument("--gpx", help="optional GPX file (corridor mode, unused by default)")
+    src.add_argument("--bbox", nargs=4, type=float, metavar=("SWLAT", "SWLON", "NELAT", "NELON"),
+                     help="bounding box (default: Saigon / HCMC)")
+    ap.add_argument("--buffer", type=float, default=1.5, help="corridor half-width in km if --gpx is set")
+    ap.add_argument("--taxon", choices=sorted(TAXA), help="restrict to a taxonomic group")
+    ap.add_argument("--quality", default="research", choices=["research", "needs_id", "casual", "any"])
+    ap.add_argument("--include-captive", action="store_true", help="keep captive/cultivated records")
+    ap.add_argument("--out-prefix", default="pages/data/saigon", help="output filename prefix")
+    args = ap.parse_args()
+
+    taxon_id = TAXA.get(args.taxon)
+    quality = None if args.quality == "any" else args.quality
+
+    if args.gpx:
+        coords = parse_gpx(args.gpx)
+        print(f"Route: {len(coords)} points", file=sys.stderr)
+        corridor, to_utm = build_corridor(coords, args.buffer)
+        bbox = corridor_bbox(coords, args.buffer)
+    else:
+        bbox = tuple(args.bbox) if args.bbox else SAIGON_BBOX
+        corridor = to_utm = None
+    print(f"Query bbox: {bbox}", file=sys.stderr)
+
+    obs_rows = []
+
+    kept = 0
+    for obs in iter_observations(bbox, taxon_id=taxon_id,
+                                 quality_grade=quality or "any",
+                                 exclude_captive=not args.include_captive):
+        c = obs_coords(obs)
+        if not c:
+            continue
+        lat, lon = c
+        obscured = bool(obs.get("obscured") or obs.get("taxon_geoprivacy") in ("obscured", "private"))
+
+        if corridor is not None and not obscured:
+            x, y = to_utm(lon, lat)
+            if not corridor.contains(Point(x, y)):
+                continue
+
+        taxon = obs.get("taxon") or {}
+        sci = taxon.get("name", "")
+        common = taxon.get("preferred_common_name", "") or ""
+        group = taxon.get("iconic_taxon_name", "") or ""
+
+        obs_rows.append([group, common, sci, f"{lat:.5f}", f"{lon:.5f}",
+                         obs.get("observed_on") or "", "yes" if obscured else "no",
+                         obs.get("uri", ""), photo_url(obs)])
+        kept += 1
+
+    print(f"Kept {kept} observations", file=sys.stderr)
+
+    out_dir = os.path.dirname(args.out_prefix)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    obs_path = f"{args.out_prefix}_observations.csv"
+    with open(obs_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["group", "common_name", "scientific_name", "lat", "lon",
+                    "observed_on", "coords_obscured", "obs_url", "photo_url"])
+        w.writerows(obs_rows)
+
+    print(f"Wrote {obs_path}")
+
+
+if __name__ == "__main__":
+    main()
