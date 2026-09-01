@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Saigon Wildlife</title>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <style>
   :root {
     --bg: #f7f6f2;
@@ -59,6 +63,28 @@
   .toolbar select:hover { border-color: var(--accent); }
   .toolbar select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
   .count { flex: 0 0 auto; color: var(--muted); font-size: 0.82rem; white-space: nowrap; }
+  .view-toggle { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
+  .view-toggle button { appearance: none; border: 0; background: transparent; color: var(--muted); font-size: 0.85rem; font-weight: 600; padding: 10px 14px; cursor: pointer; }
+  .view-toggle button + button { border-left: 1px solid var(--border); }
+  .view-toggle button:hover { color: var(--text); }
+  .view-toggle button.active { background: var(--accent-weak); color: var(--accent); }
+  .map-wrap { height: min(72vh, 720px); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
+  @media (max-width: 700px) {
+    .map-wrap { height: min(62vh, 560px); }
+    .leaflet-popup-content img { width: 120px; height: 120px; }
+  }
+  #map { width: 100%; height: 100%; }
+  .map-legend { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 0.78rem; box-shadow: var(--shadow); display: flex; gap: 10px; align-items: center; }
+  .map-legend i.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; margin-right: 5px; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+  .leaflet-popup-content { margin: 10px 12px; }
+  .leaflet-popup-content img { width: 180px; height: 180px; object-fit: cover; border-radius: 8px; display: block; margin-bottom: 8px; background: var(--chip); }
+  .popup-name { font-size: 0.86rem; margin-bottom: 4px; }
+  .leaflet-bar a { background: var(--panel); color: var(--text); border-bottom-color: var(--border); }
+  .leaflet-bar a:hover { background: var(--accent-weak); }
+  .leaflet-control-attribution { background: var(--panel); color: var(--muted); }
+  .marker-cluster { background: color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 50%; }
+  .marker-cluster div { background: var(--accent); color: var(--bg); width: 30px; height: 30px; margin: 5px; border-radius: 50%; font-weight: 700; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; }
   .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); }
   table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
   thead th { position: sticky; top: 0; background: var(--panel); text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: var(--muted); font-weight: 600; user-select: none; }
@@ -89,14 +115,21 @@
     <div class="select-wrap">
       <select id="groupFilter"><option value="">All groups</option></select>
     </div>
+    <div class="view-toggle" role="group" aria-label="View">
+      <button type="button" id="viewTable" class="active" aria-pressed="true">Table</button>
+      <button type="button" id="viewMap" aria-pressed="false">Map</button>
+    </div>
     <span class="count" id="count"></span>
   </div>
-  <div class="table-scroll">
+  <div class="table-scroll" id="tableView">
     <table id="table">
       <thead><tr id="headRow"></tr></thead>
       <tbody id="body"></tbody>
     </table>
     <div class="empty" id="empty" style="display:none">No rows match. Run make run locally to fill the CSV.</div>
+  </div>
+  <div class="map-wrap" id="mapView" hidden>
+    <div id="map"></div>
   </div>
 </div>
 <footer>
@@ -120,6 +153,8 @@ const CONFIG = {
 };
 let rows = [];
 let sortState = { ...CONFIG.defaultSort };
+let view = 'table';
+let map, markersLayer, mapReady;
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -151,6 +186,66 @@ function populateGroupFilter(data) {
     sel.appendChild(opt);
   }
 }
+function filteredRows() {
+  const group = document.getElementById('groupFilter').value;
+  return group ? rows.filter(r => r.group === group) : rows;
+}
+function mappable(r) {
+  if (r.coords_obscured === 'yes') return false;
+  return Number.isFinite(parseFloat(r.lat)) && Number.isFinite(parseFloat(r.lon));
+}
+function popupHtml(r) {
+  const name = CONFIG.render.common_name(r.common_name, r);
+  const img = r.photo_url ? '<img src="' + esc(r.photo_url) + '" alt="">' : '';
+  const link = CONFIG.render.obs_url(r.obs_url);
+  return img + '<div class="popup-name">' + name + '</div>' + link;
+}
+function renderMarkers() {
+  if (!map || !markersLayer) return;
+  markersLayer.clearLayers();
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2f6b3a';
+  const pts = [];
+  for (const r of filteredRows()) {
+    if (!mappable(r)) continue;
+    const latlng = [parseFloat(r.lat), parseFloat(r.lon)];
+    L.circleMarker(latlng, { radius: 6, color: '#fff', weight: 1, fillColor: accent, fillOpacity: 0.9 })
+      .bindPopup(popupHtml(r), { maxWidth: 220 })
+      .addTo(markersLayer);
+    pts.push(latlng);
+  }
+  if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [24, 24] });
+}
+async function initMap() {
+  map = L.map('map', { scrollWheelZoom: true, maxZoom: 19 }).setView([10.7545, 106.6955], 11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  }).addTo(map);
+  markersLayer = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 40 });
+  map.addLayer(markersLayer);
+  const legend = L.control({ position: 'bottomleft' });
+  legend.onAdd = () => {
+    const d = L.DomUtil.create('div', 'map-legend');
+    d.innerHTML = '<span><i class="dot" style="background:var(--accent)"></i>Species</span>';
+    return d;
+  };
+  legend.addTo(map);
+  renderMarkers();
+}
+function setView(next) {
+  view = next;
+  const isMap = next === 'map';
+  document.getElementById('tableView').hidden = isMap;
+  document.getElementById('mapView').hidden = !isMap;
+  document.getElementById('viewTable').classList.toggle('active', !isMap);
+  document.getElementById('viewMap').classList.toggle('active', isMap);
+  document.getElementById('viewTable').setAttribute('aria-pressed', String(!isMap));
+  document.getElementById('viewMap').setAttribute('aria-pressed', String(isMap));
+  if (isMap) {
+    if (!mapReady) mapReady = initMap();
+    Promise.resolve(mapReady).then(() => { map.invalidateSize(); renderMarkers(); });
+  }
+}
 function sortValue(r, col) {
   if (col === 'common_name') return r.common_name || r.scientific_name || '';
   return r[col] ?? '';
@@ -179,14 +274,13 @@ function renderHead() {
   }
 }
 function renderBody() {
-  const group = document.getElementById('groupFilter').value;
-  let data = rows;
-  if (group) data = data.filter(r => r.group === group);
+  let data = filteredRows();
   if (sortState.col) data = sortRows(data, sortState.col, sortState.dir, sortState.numeric);
   const body = document.getElementById('body');
   const empty = document.getElementById('empty');
   body.innerHTML = '';
   document.getElementById('count').textContent = data.length.toLocaleString() + ' / ' + rows.length.toLocaleString() + ' rows';
+  if (view === 'map') renderMarkers();
   if (!data.length) { empty.style.display = 'block'; return; }
   empty.style.display = 'none';
   const frag = document.createDocumentFragment();
@@ -209,6 +303,8 @@ async function init() {
   renderBody();
 }
 document.getElementById('groupFilter').addEventListener('change', renderBody);
+document.getElementById('viewTable').addEventListener('click', () => setView('table'));
+document.getElementById('viewMap').addEventListener('click', () => setView('map'));
 init();
 </script>
 </body>
