@@ -15,6 +15,7 @@ Forked in spirit from `sapa-wildlife`. This repo does not use a GPX corridor by 
 make install                                    # uv sync
 make run [TAXON=birds]                          # pull the default Saigon box
 make run SWLAT=10.72 SWLON=106.62 NELAT=10.88 NELON=106.85
+make test                                       # offline unit tests
 make lint                                       # ruff check
 make fmt                                        # ruff format
 make clean                                      # rm pages/data/ and stray *_observations.csv
@@ -25,7 +26,7 @@ Default box: `10.349 106.364 11.160 107.027` (SWLAT SWLON NELAT NELON).
 `TAXON` must be one of the keys in `TAXA` in `scripts/inat_corridor.py` (`snakes`, `reptiles`,
 `amphibians`, `birds`, `mammals`, `insects`, `plants`, `fungi`). Omit it to pull all taxa.
 
-There is no test suite. Do not run the pull unless asked — the user runs it locally.
+Tests in `tests/` cover the pure helpers only (no network). Do not run the pull unless asked — the user runs it locally.
 
 ## Architecture
 

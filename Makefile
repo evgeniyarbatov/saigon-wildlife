@@ -14,7 +14,7 @@ TAXON_ARG := $(if $(TAXON),--taxon $(TAXON),)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install run lint fmt clean
+.PHONY: help install run test lint fmt clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -25,6 +25,9 @@ install: ## Create the venv and install deps with uv
 
 run: install ## City box: make run [TAXON=birds] [SWLAT=... SWLON=... NELAT=... NELON=...]
 	$(UV) run python scripts/inat_corridor.py --bbox $(SWLAT) $(SWLON) $(NELAT) $(NELON) $(TAXON_ARG) --out-prefix "$(OUT)"
+
+test: install ## Run unit tests (offline)
+	$(UV) run python -m unittest discover -s tests
 
 lint: ## Lint with ruff
 	$(UV) run ruff check .
