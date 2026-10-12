@@ -16,7 +16,7 @@ Site: https://evgeniyarbatov.github.io/saigon-wildlife/
 
 | Folder | Status | Last touched | Next step |
 |---|---|---|---|
-| root | active | 2026-10-06 | — |
+| root | active | 2026-09-01 | — |
 
 ## Quickstart (uv)
 
