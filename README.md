@@ -12,12 +12,6 @@ and the CSV data it reads.
 
 Site: https://evgeniyarbatov.github.io/saigon-wildlife/
 
-## Status
-
-| Folder | Status | Last touched | Next step |
-|---|---|---|---|
-| root | active | 2026-09-01 | — |
-
 ## Quickstart (uv)
 
 ```bash
