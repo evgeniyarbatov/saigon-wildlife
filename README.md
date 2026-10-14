@@ -37,10 +37,9 @@ make run SWLAT=10.72 SWLON=106.62 NELAT=10.88 NELON=106.85
 | target        | what it does |
 |---------------|--------------|
 | `make help`   | list targets |
-| `make install`| create the venv + install deps (`uv sync`) |
+| `make setup`| create the venv + install deps (`uv sync`) |
 | `make run`    | pull observations for the Saigon bounding box |
 | `make lint` / `make fmt` | ruff |
-| `make clean`  | delete generated CSVs |
 
 Each run writes `pages/data/saigon_observations.csv`, one row per sighting.
 

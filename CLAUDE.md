@@ -12,13 +12,12 @@ Forked in spirit from `sapa-wildlife`. This repo does not use a GPX corridor by 
 ## Commands
 
 ```bash
-make install                                    # uv sync
+make setup                                      # uv sync
 make run [TAXON=birds]                          # pull the default Saigon box
 make run SWLAT=10.72 SWLON=106.62 NELAT=10.88 NELON=106.85
 make test                                       # offline unit tests
 make lint                                       # ruff check
 make fmt                                        # ruff format
-make clean                                      # rm pages/data/ and stray *_observations.csv
 ```
 
 Default box: `10.349 106.364 11.160 107.027` (SWLAT SWLON NELAT NELON).
